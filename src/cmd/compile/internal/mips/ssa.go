@@ -197,7 +197,6 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		ssa.OpMIPSANDconst,
 		ssa.OpMIPSORconst,
 		ssa.OpMIPSXORconst,
-		ssa.OpMIPSNORconst,
 		ssa.OpMIPSSLLconst,
 		ssa.OpMIPSSRLconst,
 		ssa.OpMIPSSRAconst,
@@ -479,7 +478,7 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		p6.To.SetTarget(p2)
 	case ssa.OpMIPSCALLstatic, ssa.OpMIPSCALLclosure, ssa.OpMIPSCALLinter:
 		s.Call(v)
-	case ssa.OpMIPSCALLtail:
+	case ssa.OpMIPSCALLtail, ssa.OpMIPSCALLtailinter:
 		s.TailCall(v)
 	case ssa.OpMIPSLoweredWB:
 		p := s.Prog(obj.ACALL)
@@ -551,7 +550,7 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 			}
 		case ssa.OpMIPSLoweredPanicBoundsCR:
 			yIsReg = true
-			yVal := int(v.Args[0].Reg() - mips.REG_R1)
+			yVal = int(v.Args[0].Reg() - mips.REG_R1)
 			c := v.Aux.(ssa.PanicBoundsC).C
 			if c >= 0 && c <= abi.BoundsMaxConst {
 				xVal = int(c)

@@ -182,9 +182,10 @@ func fileListForExt(p *build.Package, ext string) *[]string {
 }
 
 var (
-	slashSlash = []byte("//")
-	slashStar  = []byte("/*")
-	starSlash  = []byte("*/")
+	bSlashSlash = []byte("//")
+	bSlashStar  = []byte("/*")
+	bStarSlash  = []byte("*/")
+	bPlusBuild  = []byte("+build")
 )
 
 var dummyPkg build.Package
@@ -296,11 +297,6 @@ func cleanDecls(m map[string][]token.Position) ([]string, map[string][]token.Pos
 }
 
 var (
-	bSlashSlash = []byte(slashSlash)
-	bStarSlash  = []byte(starSlash)
-	bSlashStar  = []byte(slashStar)
-	bPlusBuild  = []byte("+build")
-
 	goBuildComment = []byte("//go:build")
 
 	errMultipleGoBuild = errors.New("multiple //go:build comments")
@@ -382,7 +378,7 @@ Lines:
 			end = len(content) - len(p)
 			continue Lines
 		}
-		if !bytes.HasPrefix(line, slashSlash) { // Not comment line
+		if !bytes.HasPrefix(line, bSlashSlash) { // Not comment line
 			ended = true
 		}
 
@@ -399,9 +395,9 @@ Lines:
 	Comments:
 		for len(line) > 0 {
 			if inSlashStar {
-				if i := bytes.Index(line, starSlash); i >= 0 {
+				if i := bytes.Index(line, bStarSlash); i >= 0 {
 					inSlashStar = false
-					line = bytes.TrimSpace(line[i+len(starSlash):])
+					line = bytes.TrimSpace(line[i+len(bStarSlash):])
 					continue Comments
 				}
 				continue Lines
@@ -426,7 +422,7 @@ Lines:
 // These lines set CFLAGS, CPPFLAGS, CXXFLAGS and LDFLAGS and pkg-config directives
 // that affect the way cgo's C code is built.
 func (ctxt *Context) saveCgo(filename string, di *build.Package, text string) error {
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		orig := line
 
 		// Line is

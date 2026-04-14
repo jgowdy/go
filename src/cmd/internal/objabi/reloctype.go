@@ -72,6 +72,11 @@ const (
 	// is not set on intel platforms but is set to a TLS symbol -- runtime.tlsg -- in
 	// the linker when externally linking).
 	R_TLS_IE
+	// R_TLS_GD, used on amd64, resolves using the General Dynamic TLS model
+	// (TLSDESC on amd64). Generates a TLSDESC sequence that calls the dynamic
+	// linker's resolver to obtain the TLS offset. Required for libraries loaded
+	// via dlopen on non-glibc systems. See go.dev/issue/13492.
+	R_TLS_GD
 	R_GOTOFF
 	R_PLT0
 	R_PLT1
@@ -136,6 +141,12 @@ const (
 	// the thread local base and the thread local variable defined by the
 	// referenced (thread local) symbol from the GOT.
 	R_ARM64_TLS_IE
+
+	// R_ARM64_TLS_GD relocates an ADRP; LDR; ADD; BLR instruction sequence
+	// (TLSDESC) to obtain the offset from the thread local base to the
+	// thread local variable. Used for General Dynamic TLS model, required
+	// for libraries loaded via dlopen on non-glibc systems.
+	R_ARM64_TLS_GD
 
 	// R_ARM64_GOTPCREL relocates an adrp, ld64 pair to compute the address of the GOT
 	// slot of the referenced symbol.
@@ -212,6 +223,11 @@ const (
 	// the thread pointer in one prefixed instruction.
 	R_POWER_TLS_LE_TPREL34
 
+	// R_POWER_TLS_GD relocates a D-form instruction pair using the General Dynamic
+	// TLS model for ppc64. Emits R_PPC64_GOT_TLSGD16_HA/LO to obtain the GOT entry
+	// for the TLS variable, used with __tls_get_addr. See go.dev/issue/13492.
+	R_POWER_TLS_GD
+
 	// R_ADDRPOWER_DS is similar to R_ADDRPOWER above, but assumes the second
 	// instruction is a "DS-form" instruction, which has an immediate field occupying
 	// bits [15:2] of the instruction word. Bits [15:2] of the address of the
@@ -282,6 +298,11 @@ const (
 	// LUI + I-type instruction sequence.
 	R_RISCV_TLS_LE
 
+	// R_RISCV_TLS_GD resolves a 32 bit TLS general-dynamic address for an
+	// AUIPC + ADDI instruction pair. Used with __tls_get_addr.
+	// See go.dev/issue/13492.
+	R_RISCV_TLS_GD
+
 	// R_RISCV_GOT_HI20 resolves the high 20 bits of a 32-bit PC-relative GOT
 	// address.
 	R_RISCV_GOT_HI20
@@ -305,6 +326,14 @@ const (
 	// R_RISCV_BRANCH resolves a 12-bit PC-relative branch offset.
 	R_RISCV_BRANCH
 
+	// R_RISCV_ADD32 resolves a 32-bit label addition, being the stored value,
+	// plus the symbol address plus the addend (V + S + A).
+	R_RISCV_ADD32
+
+	// R_RISCV_SUB32 resolves a 32-bit label subtraction, being the stored value,
+	// minus the symbol address minus the addend (V - S - A).
+	R_RISCV_SUB32
+
 	// R_RISCV_RVC_BRANCH resolves an 8-bit PC-relative offset for a CB-type
 	// instruction.
 	R_RISCV_RVC_BRANCH
@@ -319,12 +348,23 @@ const (
 
 	// Loong64.
 
-	// R_LOONG64_ADDR_HI resolves to the sign-adjusted "upper" 20 bits (bit 5-24) of an
-	// external address, by encoding it into the instruction.
+	// R_LOONG64_ADDR_HI resolves [31...12]bits of 32/64-bit PC-relative offset of an
+	// external address, by encoding it into addi.w/addi.d instruction
 	// R_LOONG64_ADDR_LO resolves to the low 12 bits of an external address, by encoding
-	// it into the instruction.
+	// it into pcalau12i instruction.
 	R_LOONG64_ADDR_HI
 	R_LOONG64_ADDR_LO
+
+	// R_LOONG64_ADDR64_HI resolves [63...52]bits of 64-bit PC-relative offset of an
+	// external address, by encoding it into lu52i.d instruction
+	// R_LOONG64_ADDR64_LO resolves [51...32]bits of 64-bit PC-relative offset of an
+	// external address, by encoding it into lu32i.d instruction
+	R_LOONG64_ADDR64_HI
+	R_LOONG64_ADDR64_LO
+
+	// R_LOONG64_ADDR_PCREL20_S2 resolves to the 22-bit, 4-byte aligned offset of an
+	// external address, by encoding it into a PCADDI instruction.
+	R_LOONG64_ADDR_PCREL20_S2
 
 	// R_LOONG64_TLS_LE_HI resolves to the high 20 bits of a TLS address (offset from
 	// thread pointer), by encoding it into the instruction.
@@ -333,34 +373,52 @@ const (
 	R_LOONG64_TLS_LE_HI
 	R_LOONG64_TLS_LE_LO
 
-	// R_CALLLOONG64 resolves to non-PC-relative target address of a CALL (BL/JIRL)
-	// instruction, by encoding the address into the instruction.
+	// R_CALLLOONG64 resolves to the 28-bit 4-byte aligned PC-relative target
+	// address of a BL instruction, by encoding it into the instruction.
 	R_CALLLOONG64
+
+	// R_LOONG64_CALL36 resolves to the 38-bit 4-byte aligned PC-relative target
+	// address of a PCADDU18I + JIRL pair, by encoding it into the instructions.
+	R_LOONG64_CALL36
 
 	// R_LOONG64_TLS_IE_HI and R_LOONG64_TLS_IE_LO relocates a pcalau12i, ld.d
 	// pair to compute the address of the GOT slot of the tls symbol.
 	R_LOONG64_TLS_IE_HI
 	R_LOONG64_TLS_IE_LO
 
-	// R_LOONG64_GOT_HI and R_LOONG64_GOT_LO resolves a GOT-relative instruction sequence,
-	// usually an pcalau12i followed by another ld or addi instruction.
+	// R_LOONG64_TLS_GD_HI and R_LOONG64_TLS_GD_LO relocate a pcalau12i, addi.d
+	// pair using the General Dynamic TLS model for loong64. Used with
+	// __tls_get_addr. See go.dev/issue/13492.
+	R_LOONG64_TLS_GD_HI
+	R_LOONG64_TLS_GD_LO
+
+	// R_LOONG64_GOT_HI resolves [31...12]bits of 32/64-bit PC-relative offset of
+	// GOT entry, by encoding it into pcalau12i instruction
+	// R_LOONG64_GOT_LO resolves [11...0]bits of 32/64-bit PC-relative offset of
+	// GOT entry, by encoding it into ld.w/ld.d instruction
 	R_LOONG64_GOT_HI
 	R_LOONG64_GOT_LO
+
+	// R_LOONG64_GOT64_HI resolves [63...52]bits of 64-bit PC-relative offset of
+	// GOT entry, by encoding it into lu52i.d instruction
+	// R_LOONG64_GOT64_LO resolves [51...32]bits of 64-bit PC-relative offset of
+	// GOT entry, by encoding it into lu32i.d instruction
+	R_LOONG64_GOT64_HI
+	R_LOONG64_GOT64_LO
 
 	// 64-bit in-place addition.
 	R_LOONG64_ADD64
 	// 64-bit in-place subtraction.
 	R_LOONG64_SUB64
 
-	// R_JMP16LOONG64 resolves to 18-bit PC-relative target address of a JMP instructions.
+	// R_JMP16LOONG64 resolves to the 18-bit 4-byte aligned PC-relative target
+	// address of a BEQ/BNE/BLT/BGE/BLTU/BGEU instruction, by encoding it into
+	// the instruction.
 	R_JMP16LOONG64
 
-	// R_JMP21LOONG64 resolves to 23-bit PC-relative target address of a JMP instructions.
+	// R_JMP21LOONG64 resolves to the 23-bit 4-byte aligned PC-relative target
+	// address of a BEQZ/BNEZ instruction, by encoding it into the instruction.
 	R_JMP21LOONG64
-
-	// R_JMPLOONG64 resolves to non-PC-relative target address of a JMP instruction,
-	// by encoding the address into the instruction.
-	R_JMPLOONG64
 
 	// R_ADDRMIPSU (only used on mips/mips64) resolves to the sign-adjusted "upper" 16
 	// bits (bit 16-31) of an external address, by encoding it into the instruction.
@@ -439,8 +497,6 @@ func (r RelocType) IsDirectCall() bool {
 func (r RelocType) IsDirectJump() bool {
 	switch r {
 	case R_JMPMIPS:
-		return true
-	case R_JMPLOONG64:
 		return true
 	}
 	return false

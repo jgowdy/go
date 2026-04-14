@@ -9,6 +9,59 @@
 #include "funcdata.h"
 #include "textflag.h"
 #include "asm_ppc64x.h"
+#include "cgo/abi_ppc64x.h"
+
+// This is called using the host ABI. argc and argv arguments
+// should be in R3 and R4 respectively.
+TEXT _rt0_ppc64x_lib(SB),NOSPLIT|NOFRAME,$0
+	// Start with standard C stack frame layout and linkage, allocate
+	// 16 bytes of argument space, save callee-save regs, and set R0 to $0.
+	// Allocate an extra 16 bytes to account for the larger fixed frame size
+	// of aix/elfv1 (48 vs 32) to ensure 16 bytes of parameter save space.
+	STACK_AND_SAVE_HOST_TO_GO_ABI(32)
+	// The above will not preserve R2 (TOC). Save it in case Go is
+	// compiled without a TOC pointer (e.g -buildmode=default).
+	MOVD	R2, 24(R1)
+
+	MOVD	R3, _rt0_ppc64x_lib_argc<>(SB)
+	MOVD	R4, _rt0_ppc64x_lib_argv<>(SB)
+
+	// Synchronous initialization.
+	MOVD	$runtime·reginit(SB), R12
+	MOVD	R12, CTR
+	BL	(CTR)
+
+	// Initialize g as nil in case of using g later e.g. sigaction in cgo_sigaction.go
+	MOVD	R0, g
+
+#ifdef GOOS_aix
+	// See runtime/cgo/gcc_aix_ppc64.c
+	MOVBZ	runtime·isarchive(SB), R3	// Check buildmode = c-archive
+	CMP		$0, R3
+	BEQ		skipInit
+#endif
+
+	MOVD	$runtime·libInit(SB), R12
+	MOVD	R12, CTR
+	BL	(CTR)
+
+skipInit:
+	// Restore and return to ELFv2 caller.
+	UNSTACK_AND_RESTORE_GO_TO_HOST_ABI(32)
+	RET
+
+TEXT runtime·rt0_lib_go<ABIInternal>(SB),NOSPLIT,$0
+	MOVD	_rt0_ppc64x_lib_argc<>(SB), R3
+	MOVD	_rt0_ppc64x_lib_argv<>(SB), R4
+	MOVD	$runtime·rt0_go(SB), R12
+	MOVD	R12, CTR
+	BR	(CTR)
+
+DATA _rt0_ppc64x_lib_argc<>(SB)/8, $0
+GLOBL _rt0_ppc64x_lib_argc<>(SB),NOPTR, $8
+DATA _rt0_ppc64x_lib_argv<>(SB)/8, $0
+GLOBL _rt0_ppc64x_lib_argv<>(SB),NOPTR, $8
+
 
 #ifdef GOOS_aix
 #define cgoCalleeStackSize 48
@@ -117,9 +170,9 @@ TEXT runtime·breakpoint(SB),NOSPLIT|NOFRAME,$0-0
 TEXT runtime·asminit(SB),NOSPLIT|NOFRAME,$0-0
 	RET
 
-// Any changes must be reflected to runtime/cgo/gcc_aix_ppc64.S:.crosscall_ppc64
+// Any changes must be reflected to runtime/cgo/gcc_aix_ppc64.S:.crosscall1
 TEXT _cgo_reginit(SB),NOSPLIT|NOFRAME,$0-0
-	// crosscall_ppc64 and crosscall2 need to reginit, but can't
+	// crosscall1 and crosscall2 need to reginit, but can't
 	// get at the 'runtime.reginit' symbol.
 	BR	runtime·reginit(SB)
 
@@ -533,8 +586,10 @@ CALLFN(·call268435456, 268435456)
 CALLFN(·call536870912, 536870912)
 CALLFN(·call1073741824, 1073741824)
 
-TEXT runtime·procyield(SB),NOSPLIT|NOFRAME,$0-4
+TEXT runtime·procyieldAsm(SB),NOSPLIT|NOFRAME,$0-4
 	MOVW	cycles+0(FP), R7
+	CMP	$0, R7
+	BEQ	done
 	// POWER does not have a pause/yield instruction equivalent.
 	// Instead, we can lower the program priority by setting the
 	// Program Priority Register prior to the wait loop and set it
@@ -546,6 +601,7 @@ again:
 	CMP	$0, R7
 	BNE	again
 	OR	R6, R6, R6	// Set PPR priority back to medium-low
+done:
 	RET
 
 // Save state of caller into g->sched,
@@ -699,10 +755,6 @@ nosave:
 	// This code is like the above sequence but without saving/restoring g
 	// and without worrying about the stack moving out from under us
 	// (because we're on a system stack, not a goroutine stack).
-	// The above code could be used directly if already on a system stack,
-	// but then the only path through this code would be a rare case.
-	// Using this code for all "already on system stack" calls exercises it more,
-	// which should help keep it correct.
 
 	SUB	$(asmcgocallSaveOffset+8), R1, R10
 	RLDCR	$0, R10, $~15, R1		// 16-byte alignment for gcc ABI

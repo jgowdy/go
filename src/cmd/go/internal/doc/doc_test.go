@@ -629,6 +629,35 @@ var tests = []test{
 			`Has unexported methods`,
 		},
 	},
+	// Interface with comparable constraint.
+	{
+		"interface type with comparable",
+		[]string{p, `ExportedComparableInterface`},
+		[]string{
+			`Comment about exported interface with comparable`, // Include comment.
+			`type ExportedComparableInterface interface`,       // Interface definition.
+			`comparable.*Comment on line with comparable`,      // Comparable should be shown.
+			`ExportedMethod\(\).*Comment on line with exported method`,
+			`Has unexported methods`,
+		},
+		[]string{
+			`unexportedMethod`, // No unexported method.
+		},
+	},
+	// Interface with only comparable (no unexported methods).
+	{
+		"interface type with comparable only",
+		[]string{p, `ExportedComparableOnlyInterface`},
+		[]string{
+			`ExportedComparableOnlyInterface has only comparable`, // Include comment.
+			`type ExportedComparableOnlyInterface interface`,      // Interface definition.
+			`comparable.*Comment on line with comparable`,         // Comparable should be shown.
+			`ExportedMethod\(\).*Comment on line with exported method`,
+		},
+		[]string{
+			`Has unexported methods`, // Should NOT appear - no unexported methods.
+		},
+	},
 
 	// Interface method.
 	{
@@ -719,6 +748,143 @@ var tests = []test{
 		[]string{p, `ExportedStructOneField.OnlyField`},
 		[]string{`the only field`},
 		[]string{`other fields elided`},
+	},
+
+	// Package with -ex.
+	{
+		"package with -ex",
+		[]string{`-ex`, p},
+		[]string{
+			`func ExampleExportedFunc\(\)`,
+			`func ExampleExportedType\(\)`,
+			`func Example\(\)`,
+			`func Example_multiline\(\)`,
+			`func Example_playable\(\)`,
+		},
+		nil,
+	},
+
+	// Type with -ex.
+	{
+		"type with -ex",
+		[]string{`-ex`, p, `ExportedType`},
+		[]string{
+			`func ExampleExportedType\(\)`,
+			`func ExampleExportedType_ExportedMethod\(\)`,
+		},
+		nil,
+	},
+
+	// Function with -ex.
+	{
+		"function with -ex",
+		[]string{`-ex`, p, `ExportedFunc`},
+		[]string{
+			`func ExampleExportedFunc\(\)`,
+			`Function example.`,
+			`func ExampleExportedFunc_two\(\)`,
+			`Function example two.`,
+		},
+		nil,
+	},
+
+	// Method with -ex.
+	{
+		"method with -ex",
+		[]string{`-ex`, p, `ExportedType.ExportedMethod`},
+		[]string{
+			`func ExampleExportedType_ExportedMethod\(\)`,
+			`Method example.`,
+		},
+		nil,
+	},
+
+	// Package example.
+	{
+		"package example",
+		[]string{p, `Example`},
+		[]string{
+			`fmt.Println\("Package example output"\)`,
+			`Output: Package example output`,
+		},
+		[]string{`func Example\(\)`},
+	},
+
+	// Multiline output example.
+	{
+		"multiline output example",
+		[]string{p, `Example_multiline`},
+		[]string{
+			`fmt.Println\("Multiline\\nexample\\noutput"\)`,
+			"Output: \nMultiline\nexample\noutput",
+		},
+		[]string{`Output: Multiline example output`},
+	},
+
+	// Type example.
+	{
+		"type example",
+		[]string{p, `ExampleExportedType`},
+		[]string{
+			`fmt.Println\("Type example output"\)`,
+			`Output: Type example output`,
+		},
+		[]string{`func ExampleExportedType\(\)`},
+	},
+
+	// Function example.
+	{
+		"function example",
+		[]string{p, `ExampleExportedFunc`},
+		[]string{
+			`fmt.Println\("Function example output"\)`,
+			`Output: Function example output`,
+		},
+		[]string{
+			`func ExampleExportedFunc\(\)`,
+			`fmt.Println\("Function example two output"\)`,
+			`Output: Function example two output`,
+		},
+	},
+
+	// Function example two.
+	{
+		"function example",
+		[]string{p, `ExampleExportedFunc_two`},
+		[]string{
+			`fmt.Println\("Function example two output"\)`,
+			`Output: Function example two output`,
+		},
+		[]string{
+			`func ExampleExportedFunc_two\(\)`,
+			`fmt.Println\("Function example output"\)`,
+			`Output: Function example output`,
+		},
+	},
+
+	// Method example.
+	{
+		"method example",
+		[]string{p, `ExampleExportedType_ExportedMethod`},
+		[]string{
+			`fmt.Println\("Method example output"\)`,
+			`Output: Method example output`,
+		},
+		[]string{`func ExampleExportedType_ExportedMethod\(\)`},
+	},
+
+	// Playable example.
+	{
+		"playable example",
+		[]string{p, `Example_playable`},
+		[]string{
+			`package main`,
+			`func main\(\) {`,
+			`fmt.Println\("Playable example output"\)`,
+			`}`,
+			`Output: Playable example output`,
+		},
+		[]string{`func Example_playable\(\)`},
 	},
 
 	// Case matching off.
@@ -881,7 +1047,7 @@ func TestDoc(t *testing.T) {
 		var flagSet flag.FlagSet
 		var logbuf bytes.Buffer
 		log.SetOutput(&logbuf)
-		err := do(&b, &flagSet, test.args)
+		err := do(t.Context(), &b, &flagSet, test.args)
 		if err != nil {
 			t.Fatalf("%s %v: %s\n", test.name, test.args, err)
 		}
@@ -934,7 +1100,7 @@ func TestMultiplePackages(t *testing.T) {
 	// Make sure crypto/rand does not have the symbol.
 	{
 		var flagSet flag.FlagSet
-		err := do(&b, &flagSet, []string{"crypto/rand.float64"})
+		err := do(t.Context(), &b, &flagSet, []string{"crypto/rand.float64"})
 		if err == nil {
 			t.Errorf("expected error from crypto/rand.float64")
 		} else if !strings.Contains(err.Error(), "no symbol float64") {
@@ -944,7 +1110,7 @@ func TestMultiplePackages(t *testing.T) {
 	// Make sure math/rand does have the symbol.
 	{
 		var flagSet flag.FlagSet
-		err := do(&b, &flagSet, []string{"math/rand.float64"})
+		err := do(t.Context(), &b, &flagSet, []string{"math/rand.float64"})
 		if err != nil {
 			t.Errorf("unexpected error %q from math/rand.float64", err)
 		}
@@ -952,7 +1118,7 @@ func TestMultiplePackages(t *testing.T) {
 	// Try the shorthand.
 	{
 		var flagSet flag.FlagSet
-		err := do(&b, &flagSet, []string{"rand.float64"})
+		err := do(t.Context(), &b, &flagSet, []string{"rand.float64"})
 		if err != nil {
 			t.Errorf("unexpected error %q from rand.float64", err)
 		}
@@ -960,7 +1126,7 @@ func TestMultiplePackages(t *testing.T) {
 	// Now try a missing symbol. We should see both packages in the error.
 	{
 		var flagSet flag.FlagSet
-		err := do(&b, &flagSet, []string{"rand.doesnotexit"})
+		err := do(t.Context(), &b, &flagSet, []string{"rand.doesnotexit"})
 		if err == nil {
 			t.Errorf("expected error from rand.doesnotexit")
 		} else {
@@ -998,21 +1164,21 @@ func TestTwoArgLookup(t *testing.T) {
 	var b bytes.Buffer // We don't care about the output.
 	{
 		var flagSet flag.FlagSet
-		err := do(&b, &flagSet, []string{"binary", "BigEndian"})
+		err := do(t.Context(), &b, &flagSet, []string{"binary", "BigEndian"})
 		if err != nil {
 			t.Errorf("unexpected error %q from binary BigEndian", err)
 		}
 	}
 	{
 		var flagSet flag.FlagSet
-		err := do(&b, &flagSet, []string{"rand", "Float64"})
+		err := do(t.Context(), &b, &flagSet, []string{"rand", "Float64"})
 		if err != nil {
 			t.Errorf("unexpected error %q from rand Float64", err)
 		}
 	}
 	{
 		var flagSet flag.FlagSet
-		err := do(&b, &flagSet, []string{"bytes", "Foo"})
+		err := do(t.Context(), &b, &flagSet, []string{"bytes", "Foo"})
 		if err == nil {
 			t.Errorf("expected error from bytes Foo")
 		} else if !strings.Contains(err.Error(), "no symbol Foo") {
@@ -1021,7 +1187,7 @@ func TestTwoArgLookup(t *testing.T) {
 	}
 	{
 		var flagSet flag.FlagSet
-		err := do(&b, &flagSet, []string{"nosuchpackage", "Foo"})
+		err := do(t.Context(), &b, &flagSet, []string{"nosuchpackage", "Foo"})
 		if err == nil {
 			// actually present in the user's filesystem
 		} else if !strings.Contains(err.Error(), "no such package") {
@@ -1042,7 +1208,7 @@ func TestDotSlashLookup(t *testing.T) {
 
 	var b strings.Builder
 	var flagSet flag.FlagSet
-	err := do(&b, &flagSet, []string{"./template"})
+	err := do(t.Context(), &b, &flagSet, []string{"./template"})
 	if err != nil {
 		t.Errorf("unexpected error %q from ./template", err)
 	}
@@ -1060,7 +1226,7 @@ func TestNoPackageClauseWhenNoMatch(t *testing.T) {
 	maybeSkip(t)
 	var b strings.Builder
 	var flagSet flag.FlagSet
-	err := do(&b, &flagSet, []string{"template.ZZZ"})
+	err := do(t.Context(), &b, &flagSet, []string{"template.ZZZ"})
 	// Expect an error.
 	if err == nil {
 		t.Error("expect an error for template.zzz")

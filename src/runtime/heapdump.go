@@ -412,10 +412,18 @@ func dumpgs() {
 	forEachG(func(gp *g) {
 		status := readgstatus(gp) // The world is stopped so gp will not be in a scan state.
 		switch status {
+		case _Grunning:
+			// Dump goroutine if it's _Grunning only during a syscall. This is safe
+			// because the goroutine will just park without mutating its stack, since
+			// the world is stopped.
+			if gp.syscallsp != 0 {
+				dumpgoroutine(gp)
+			}
+			fallthrough
 		default:
 			print("runtime: unexpected G.status ", hex(status), "\n")
 			throw("dumpgs in STW - bad status")
-		case _Gdead:
+		case _Gdead, _Gdeadextra:
 			// ok
 		case _Grunnable,
 			_Gsyscall,
@@ -472,7 +480,7 @@ func dumproots() {
 
 // Bit vector of free marks.
 // Needs to be as big as the largest number of objects per span.
-var freemark [pageSize / 8]bool
+var freemark [gc.MaxObjsPerSpan]bool
 
 func dumpobjs() {
 	// To protect mheap_.allspans.

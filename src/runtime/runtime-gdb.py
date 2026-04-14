@@ -46,11 +46,13 @@ G_MORIBUND_UNUSED = read_runtime_const("'runtime._Gmoribund_unused'", 5)
 G_DEAD = read_runtime_const("'runtime._Gdead'", 6)
 G_ENQUEUE_UNUSED = read_runtime_const("'runtime._Genqueue_unused'", 7)
 G_COPYSTACK = read_runtime_const("'runtime._Gcopystack'", 8)
+G_DEADEXTRA = read_runtime_const("'runtime._Gdeadextra'", 10)
 G_SCAN = read_runtime_const("'runtime._Gscan'", 0x1000)
 G_SCANRUNNABLE = G_SCAN+G_RUNNABLE
 G_SCANRUNNING = G_SCAN+G_RUNNING
 G_SCANSYSCALL = G_SCAN+G_SYSCALL
 G_SCANWAITING = G_SCAN+G_WAITING
+G_SCANEXTRA = G_SCAN+G_DEADEXTRA
 
 sts = {
     G_IDLE: 'idle',
@@ -62,11 +64,13 @@ sts = {
     G_DEAD: 'dead',
     G_ENQUEUE_UNUSED: 'enqueue',
     G_COPYSTACK: 'copystack',
+    G_DEADEXTRA: 'extra',
     G_SCAN: 'scan',
     G_SCANRUNNABLE: 'runnable+s',
     G_SCANRUNNING: 'running+s',
     G_SCANSYSCALL: 'syscall+s',
     G_SCANWAITING: 'waiting+s',
+    G_SCANEXTRA: 'extra+s',
 }
 
 
@@ -165,6 +169,10 @@ class MapTypePrinter:
 		cnt = 0
 		# Yield keys and elements in group.
 		# group is a value of type *group[K,V]
+		# The group layout depends on GOEXPERIMENT=mapsplitgroup:
+		#   split:       group.keys[i] / group.elems[i]
+		#   interleaved: group.slots[i].key / group.slots[i].elem
+		# Detect which layout by checking for the 'keys' field.
 		def group_slots(group):
 			ctrl = group['ctrl']
 
@@ -175,8 +183,15 @@ class MapTypePrinter:
 					continue
 
 				# Full
-				yield str(cnt), group['slots'][i]['key']
-				yield str(cnt+1), group['slots'][i]['elem']
+				# The group layout depends on GOEXPERIMENT=mapsplitgroup:
+				#   split:       group.keys[i] / group.elems[i]
+				#   interleaved: group.slots[i].key / group.slots[i].elem
+				try:
+					yield str(cnt), group['slots'][i]['key']
+					yield str(cnt+1), group['slots'][i]['elem']
+				except gdb.error:
+					yield str(cnt), group['keys'][i]
+					yield str(cnt+1), group['elems'][i]
 
 		# The linker DWARF generation
 		# (cmd/link/internal/ld.(*dwctxt).synthesizemaptypes) records
@@ -524,7 +539,7 @@ class GoroutinesCmd(gdb.Command):
 		# args = gdb.string_to_argv(arg)
 		vp = gdb.lookup_type('void').pointer()
 		for ptr in SliceValue(gdb.parse_and_eval("'runtime.allgs'")):
-			if ptr['atomicstatus']['value'] == G_DEAD:
+			if ptr['atomicstatus']['value'] in [G_DEAD, G_DEADEXTRA]:
 				continue
 			s = ' '
 			if ptr['m']:
@@ -549,7 +564,7 @@ def find_goroutine(goid):
 	"""
 	vp = gdb.lookup_type('void').pointer()
 	for ptr in SliceValue(gdb.parse_and_eval("'runtime.allgs'")):
-		if ptr['atomicstatus']['value'] == G_DEAD:
+		if ptr['atomicstatus']['value'] in [G_DEAD, G_DEADEXTRA]:
 			continue
 		if ptr['goid'] == goid:
 			break

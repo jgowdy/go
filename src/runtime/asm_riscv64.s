@@ -5,6 +5,43 @@
 #include "go_asm.h"
 #include "funcdata.h"
 #include "textflag.h"
+#include "cgo/abi_riscv64.h"
+
+
+// When building with -buildmode=c-shared, this symbol is called when the shared
+// library is loaded.
+TEXT _rt0_riscv64_lib(SB),NOSPLIT,$224
+	// Preserve callee-save registers, along with X1 (LR).
+	MOV	X1, (8*3)(X2)
+	SAVE_GPR((8*4))
+	SAVE_FPR((8*16))
+
+	// Initialize g as nil in case of using g later e.g. sigaction in cgo_sigaction.go
+	MOV	X0, g
+
+	MOV	A0, _rt0_riscv64_lib_argc<>(SB)
+	MOV	A1, _rt0_riscv64_lib_argv<>(SB)
+
+	MOV	$runtime·libInit(SB), T1
+	JALR	RA, T1
+
+	// Restore callee-save registers, along with X1 (LR).
+	MOV	(8*3)(X2), X1
+	RESTORE_GPR((8*4))
+	RESTORE_FPR((8*16))
+
+	RET
+
+TEXT runtime·rt0_lib_go<ABIInternal>(SB),NOSPLIT,$0
+	MOV	_rt0_riscv64_lib_argc<>(SB), A0
+	MOV	_rt0_riscv64_lib_argv<>(SB), A1
+	MOV	$runtime·rt0_go(SB), T0
+	JALR	ZERO, T0
+
+DATA _rt0_riscv64_lib_argc<>(SB)/8, $0
+GLOBL _rt0_riscv64_lib_argc<>(SB),NOPTR, $8
+DATA _rt0_riscv64_lib_argv<>(SB)/8, $0
+GLOBL _rt0_riscv64_lib_argv<>(SB),NOPTR, $8
 
 // func rt0_go()
 TEXT runtime·rt0_go(SB),NOSPLIT|TOPFRAME,$0
@@ -24,14 +61,14 @@ TEXT runtime·rt0_go(SB),NOSPLIT|TOPFRAME,$0
 	MOV	X2, (g_stack+stack_hi)(g)
 
 	// if there is a _cgo_init, call it using the gcc ABI.
-	MOV	_cgo_init(SB), T0
-	BEQ	T0, ZERO, nocgo
+	MOV	_cgo_init(SB), T2
+	BEQ	T2, ZERO, nocgo
 
 	MOV	ZERO, A3		// arg 3: not used
 	MOV	ZERO, A2		// arg 2: not used
 	MOV	$setg_gcc<>(SB), A1	// arg 1: setg
 	MOV	g, A0			// arg 0: G
-	JALR	RA, T0
+	JALR	RA, T2
 
 nocgo:
 	// update stackguard after _cgo_init
@@ -269,8 +306,8 @@ TEXT gogo<>(SB), NOSPLIT|NOFRAME, $0
 	MOV	gobuf_pc(T0), T0
 	JALR	ZERO, T0
 
-// func procyield(cycles uint32)
-TEXT runtime·procyield(SB),NOSPLIT,$0-0
+// func procyieldAsm(cycles uint32)
+TEXT runtime·procyieldAsm(SB),NOSPLIT,$0-0
 	RET
 
 // Switch to m->g0's stack, call fn(g).
@@ -323,9 +360,9 @@ TEXT gosave_systemstack_switch<>(SB),NOSPLIT|NOFRAME,$0
 // Call fn(arg) aligned appropriately for the gcc ABI.
 // Called on a system stack, and there may be no g yet (during needm).
 TEXT ·asmcgocall_no_g(SB),NOSPLIT,$0-16
-	MOV	fn+0(FP), X5
+	MOV	fn+0(FP), X11
 	MOV	arg+8(FP), X10
-	JALR	RA, (X5)
+	JALR	RA, (X11)
 	RET
 
 // func asmcgocall(fn, arg unsafe.Pointer) int32
@@ -333,7 +370,7 @@ TEXT ·asmcgocall_no_g(SB),NOSPLIT,$0-16
 // aligned appropriately for the gcc ABI.
 // See cgocall.go for more details.
 TEXT ·asmcgocall(SB),NOSPLIT,$0-20
-	MOV	fn+0(FP), X5
+	MOV	fn+0(FP), X11
 	MOV	arg+8(FP), X10
 
 	MOV	X2, X8	// save original stack pointer
@@ -343,6 +380,7 @@ TEXT ·asmcgocall(SB),NOSPLIT,$0-20
 	// We get called to create new OS threads too, and those
 	// come in on the m->g0 stack already. Or we might already
 	// be on the m->gsignal stack.
+	BEQZ	g, nosave
 	MOV	g_m(g), X6
 	MOV	m_gsignal(X6), X7
 	BEQ	X7, g, g0
@@ -363,7 +401,7 @@ g0:
 	SUB	X8, X9, X8
 	MOV	X8, 8(X2)	// save depth in old g stack (can't just save SP, as stack might be copied during a callback)
 
-	JALR	RA, (X5)
+	JALR	RA, (X11)
 
 	// Restore g, stack pointer. X10 is return value.
 	MOV	0(X2), g
@@ -373,6 +411,20 @@ g0:
 	SUB	X6, X5, X6
 	MOV	X6, X2
 
+	MOVW	X10, ret+16(FP)
+	RET
+
+nosave:
+	// Running on a system stack, perhaps even without a g.
+	// Having no g can happen during thread creation or thread teardown.
+	MOV	fn+0(FP), X11
+	MOV	arg+8(FP), X10
+	MOV	X2, X8
+	SUB	$16, X2
+	MOV	ZERO, 0(X2)	// Where above code stores g, in case someone looks during debugging.
+	MOV	X8, 8(X2)	// Save original stack pointer.
+	JALR	RA, (X11)
+	MOV	8(X2), X2	// Restore stack pointer.
 	MOVW	X10, ret+16(FP)
 	RET
 
@@ -525,14 +577,14 @@ TEXT _cgo_topofstack(SB),NOSPLIT,$8
 	RET
 
 // func goexit(neverCallThisFunction)
-// The top-most function running on a goroutine
-// returns to goexit+PCQuantum.
+// The top-most function running on a goroutine, returns to goexit+PCQuantum*2.
+// Note that the NOPs are written in a manner that will not be compressed,
+// since the offset must be known by the runtime.
 TEXT runtime·goexit(SB),NOSPLIT|NOFRAME|TOPFRAME,$0-0
-	MOV	ZERO, ZERO	// NOP
+	WORD	$0x00000013	// NOP
 	JMP	runtime·goexit1(SB)	// does not return
 	// traceback from goexit1 must hit code range of goexit
-	MOV	ZERO, ZERO	// NOP
-
+	WORD	$0x00000013	// NOP
 
 // This is called from .init_array and follows the platform, not the Go ABI.
 TEXT runtime·addmoduledata(SB),NOSPLIT,$0-0

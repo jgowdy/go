@@ -164,9 +164,6 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 		su := ldr.MakeSymbolUpdater(s)
 		su.SetRelocType(rIdx, objabi.R_ADDR)
 
-		if targType == sym.SDYNIMPORT {
-			ldr.Errorf(s, "unexpected reloc for dynamic symbol %s", ldr.SymName(targ))
-		}
 		if target.IsPIE() && target.IsInternal() {
 			// For internal linking PIE, this R_ADDR relocation cannot
 			// be resolved statically. We need to generate a dynamic
@@ -178,6 +175,9 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 				// Can this happen? The object is expected to be PIC.
 				ldr.Errorf(s, "unsupported relocation for PIE: %v", rt)
 			}
+		}
+		if targType == sym.SDYNIMPORT {
+			ldr.Errorf(s, "unexpected reloc for dynamic symbol %s", ldr.SymName(targ))
 		}
 		return true
 
@@ -208,7 +208,7 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 		}
 		// The second relocation has the target symbol we want
 		su.SetRelocType(rIdx+1, objabi.R_PCREL)
-		su.SetRelocAdd(rIdx+1, r.Add()+int64(r.Off())-off)
+		su.SetRelocAdd(rIdx+1, r.Add()+int64(r.Off())+int64(r.Siz())-off)
 		// Remove the other relocation
 		su.SetRelocSiz(rIdx, 0)
 		return true
@@ -407,7 +407,7 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 			} else {
 				ldr.Errorf(s, "unexpected relocation for dynamic symbol %s", ldr.SymName(targ))
 			}
-			rela.AddAddrPlus(target.Arch, targ, int64(r.Add()))
+			rela.AddAddrPlus(target.Arch, targ, r.Add())
 			// Not mark r done here. So we still apply it statically,
 			// so in the file content we'll also have the right offset
 			// to the relocation target. So it can be examined statically
@@ -419,7 +419,13 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 			// Mach-O relocations are a royal pain to lay out.
 			// They use a compact stateful bytecode representation.
 			// Here we record what are needed and encode them later.
-			ld.MachoAddRebase(s, int64(r.Off()))
+			if targType == sym.SDYNIMPORT {
+				// Dynamic import: the pointer must be bound by
+				// the dynamic linker at load time.
+				ld.MachoAddBind(s, int64(r.Off()), targ)
+			} else {
+				ld.MachoAddRebase(s, int64(r.Off()))
+			}
 			// Not mark r done here. So we still apply it statically,
 			// so in the file content we'll also have the right offset
 			// to the relocation target. So it can be examined statically
@@ -463,6 +469,23 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 	case objabi.R_TLS_IE:
 		if siz == 4 {
 			out.Write64(uint64(elf.R_X86_64_GOTTPOFF) | uint64(elfsym)<<32)
+		} else {
+			return false
+		}
+	case objabi.R_TLS_GD:
+		// TLSDESC: leaq @TLSDESC(%rip), %rax; call *@TLSCALL(%rax)
+		// Two RELA entries: GOTPC32_TLSDESC on LEA, TLSDESC_CALL on CALL.
+		// The shared addend write at line 515 applies to the SECOND entry,
+		// so we write the first entry's addend here and set up for the
+		// second entry's addend (0) to be written by line 515.
+		if siz == 4 {
+			out.Write64(uint64(elf.R_X86_64_GOTPC32_TLSDESC) | uint64(elfsym)<<32)
+			out.Write64(uint64(r.Xadd)) // addend for GOTPC32_TLSDESC = -4
+			out.Write64(uint64(sectoff + 4))
+			out.Write64(uint64(elf.R_X86_64_TLSDESC_CALL) | uint64(elfsym)<<32)
+			// The addend for TLSDESC_CALL (0) is written by the shared
+			// out.Write64(r.Xadd) after the switch. Override Xadd to 0.
+			r.Xadd = 0
 		} else {
 			return false
 		}

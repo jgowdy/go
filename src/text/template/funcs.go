@@ -22,7 +22,7 @@ import (
 // return value evaluates to non-nil during execution, execution terminates and
 // Execute returns that error.
 //
-// Errors returned by Execute wrap the underlying error; call [errors.As] to
+// Errors returned by Execute wrap the underlying error; call [errors.AsType] to
 // unwrap them.
 //
 // When template execution invokes a function with an argument list, that list
@@ -243,6 +243,10 @@ func slice(item reflect.Value, indexes ...reflect.Value) (reflect.Value, error) 
 	item = indirectInterface(item)
 	if !item.IsValid() {
 		return reflect.Value{}, fmt.Errorf("slice of untyped nil")
+	}
+	var isNil bool
+	if item, isNil = indirect(item); isNil {
+		return reflect.Value{}, fmt.Errorf("slice of nil pointer")
 	}
 	if len(indexes) > 3 {
 		return reflect.Value{}, fmt.Errorf("too many slice indexes: %d", len(indexes))

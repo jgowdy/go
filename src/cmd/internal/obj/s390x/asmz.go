@@ -581,6 +581,9 @@ func (c *ctxtz) aclass(a *obj.Addr) int {
 			}
 			c.instoffset = a.Offset
 			if a.Sym.Type == objabi.STLSBSS {
+				if c.ctxt.Flag_tlsgd {
+					return C_TLS_IE // GD uses same class; linker emits GD relocs
+				}
 				if c.ctxt.Flag_shared {
 					return C_TLS_IE // initial exec model
 				}
@@ -3130,7 +3133,7 @@ func (c *ctxtz) asmout(p *obj.Prog, asm *[]byte) {
 		case ARISBLG, ARISBLGZ:
 			opcode = op_RISBLG
 		}
-		zRIE(_f, uint32(opcode), uint32(r1), uint32(r2), 0, uint32(i3), uint32(i4), 0, uint32(i5), asm)
+		zRIE(_f, opcode, uint32(r1), uint32(r2), 0, uint32(i3), uint32(i4), 0, uint32(i5), asm)
 
 	case 15: // br/bl (reg)
 		r := p.To.Reg
@@ -3183,8 +3186,8 @@ func (c *ctxtz) asmout(p *obj.Prog, asm *[]byte) {
 		}
 		switch p.As {
 		case ASUB:
-			zRIL(_a, op_LGFI, uint32(regtmp(p)), uint32(v), asm)
-			zRRF(op_SLGRK, uint32(regtmp(p)), 0, uint32(p.To.Reg), uint32(r), asm)
+			zRIL(_a, op_LGFI, regtmp(p), uint32(v), asm)
+			zRRF(op_SLGRK, regtmp(p), 0, uint32(p.To.Reg), uint32(r), asm)
 		case ASUBC:
 			if r != p.To.Reg {
 				zRRE(op_LGR, uint32(p.To.Reg), uint32(r), asm)
@@ -3603,7 +3606,7 @@ func (c *ctxtz) asmout(p *obj.Prog, asm *[]byte) {
 				if opcode == op_MVI {
 					opcode = op_MVIY
 				} else {
-					zRXY(op_LAY, uint32(regtmp(p)), 0, uint32(r), uint32(d), asm)
+					zRXY(op_LAY, regtmp(p), 0, uint32(r), uint32(d), asm)
 					r = int16(regtmp(p))
 					d = 0
 				}

@@ -115,7 +115,7 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 			p.To.Type = obj.TYPE_REG
 			p.To.Reg = y
 		}
-	case ssa.OpMIPS64MOVVnop:
+	case ssa.OpMIPS64MOVVnop, ssa.OpMIPS64ZERO:
 		// nothing to do
 	case ssa.OpLoadReg:
 		if v.Type.IsFlags() {
@@ -191,7 +191,6 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		ssa.OpMIPS64ANDconst,
 		ssa.OpMIPS64ORconst,
 		ssa.OpMIPS64XORconst,
-		ssa.OpMIPS64NORconst,
 		ssa.OpMIPS64SLLVconst,
 		ssa.OpMIPS64SRLVconst,
 		ssa.OpMIPS64SRAVconst,
@@ -301,16 +300,6 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		p.To.Type = obj.TYPE_MEM
 		p.To.Reg = v.Args[0].Reg()
 		ssagen.AddAux(&p.To, v)
-	case ssa.OpMIPS64MOVBstorezero,
-		ssa.OpMIPS64MOVHstorezero,
-		ssa.OpMIPS64MOVWstorezero,
-		ssa.OpMIPS64MOVVstorezero:
-		p := s.Prog(v.Op.Asm())
-		p.From.Type = obj.TYPE_REG
-		p.From.Reg = mips.REGZERO
-		p.To.Type = obj.TYPE_MEM
-		p.To.Reg = v.Args[0].Reg()
-		ssagen.AddAux(&p.To, v)
 	case ssa.OpMIPS64MOVBreg,
 		ssa.OpMIPS64MOVBUreg,
 		ssa.OpMIPS64MOVHreg,
@@ -363,6 +352,7 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		ssa.OpMIPS64MOVVgpfp,
 		ssa.OpMIPS64NEGF,
 		ssa.OpMIPS64NEGD,
+		ssa.OpMIPS64ABSF,
 		ssa.OpMIPS64ABSD,
 		ssa.OpMIPS64SQRTF,
 		ssa.OpMIPS64SQRTD:
@@ -500,7 +490,7 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 		p6.To.SetTarget(p2)
 	case ssa.OpMIPS64CALLstatic, ssa.OpMIPS64CALLclosure, ssa.OpMIPS64CALLinter:
 		s.Call(v)
-	case ssa.OpMIPS64CALLtail:
+	case ssa.OpMIPS64CALLtail, ssa.OpMIPS64CALLtailinter:
 		s.TailCall(v)
 	case ssa.OpMIPS64LoweredWB:
 		p := s.Prog(obj.ACALL)
@@ -542,7 +532,7 @@ func ssaGenValue(s *ssagen.State, v *ssa.Value) {
 			}
 		case ssa.OpMIPS64LoweredPanicBoundsCR:
 			yIsReg = true
-			yVal := int(v.Args[0].Reg() - mips.REG_R1)
+			yVal = int(v.Args[0].Reg() - mips.REG_R1)
 			c := v.Aux.(ssa.PanicBoundsC).C
 			if c >= 0 && c <= abi.BoundsMaxConst {
 				xVal = int(c)

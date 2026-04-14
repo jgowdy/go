@@ -293,6 +293,8 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 		out.Write32(uint32(elf.R_ARM_TLS_LE32) | uint32(elfsym)<<8)
 	case objabi.R_TLS_IE:
 		out.Write32(uint32(elf.R_ARM_TLS_IE32) | uint32(elfsym)<<8)
+	case objabi.R_TLS_GD:
+		out.Write32(uint32(elf.R_ARM_TLS_GD32) | uint32(elfsym)<<8)
 	case objabi.R_GOTPCREL:
 		if siz == 4 {
 			out.Write32(uint32(elf.R_ARM_GOT_PREL) | uint32(elfsym)<<8)
@@ -334,36 +336,7 @@ func machoreloc1(*sys.Arch, *ld.OutBuf, *loader.Loader, loader.Sym, loader.ExtRe
 }
 
 func pereloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, sectoff int64) bool {
-	rs := r.Xsym
-	rt := r.Type
-
-	if ldr.SymDynid(rs) < 0 {
-		ldr.Errorf(s, "reloc %d (%s) to non-coff symbol %s type=%d (%s)", rt, sym.RelocName(arch, rt), ldr.SymName(rs), ldr.SymType(rs), ldr.SymType(rs))
-		return false
-	}
-
-	out.Write32(uint32(sectoff))
-	out.Write32(uint32(ldr.SymDynid(rs)))
-
-	var v uint32
-	switch rt {
-	default:
-		// unsupported relocation type
-		return false
-
-	case objabi.R_DWARFSECREF:
-		v = ld.IMAGE_REL_ARM_SECREL
-
-	case objabi.R_ADDR:
-		v = ld.IMAGE_REL_ARM_ADDR32
-
-	case objabi.R_PEIMAGEOFF:
-		v = ld.IMAGE_REL_ARM_ADDR32NB
-	}
-
-	out.Write16(uint16(v))
-
-	return true
+	return false
 }
 
 // sign extend a 24-bit integer.
@@ -429,7 +402,7 @@ func trampoline(ctxt *ld.Link, ldr *loader.Loader, ri int, rs, s loader.Sym) {
 			for i := 0; ; i++ {
 				oName := ldr.SymName(rs)
 				name := oName + fmt.Sprintf("%+d-tramp%d", offset, i)
-				tramp = ldr.LookupOrCreateSym(name, int(ldr.SymVersion(rs)))
+				tramp = ldr.LookupOrCreateSym(name, ldr.SymVersion(rs))
 				ldr.SetAttrReachable(tramp, true)
 				if ldr.SymType(tramp) == sym.SDYNIMPORT {
 					// don't reuse trampoline defined in other module

@@ -115,7 +115,7 @@ var ARMDWARFRegisters = map[int16]int16{}
 func init() {
 	// f assigns dwarfregisters[from:to] = (base):(step*(to-from)+base)
 	f := func(from, to, base, step int16) {
-		for r := int16(from); r <= to; r++ {
+		for r := from; r <= to; r++ {
 			ARMDWARFRegisters[r] = step*(r-from) + base
 		}
 	}
@@ -197,6 +197,9 @@ const (
 	// by the program linker) that the dynamic linker will fill with the
 	// offset from the thread local base.
 	C_TLS_IE
+
+	// TLS "var" in general dynamic mode: generates LDR + ADD PC + BL __tls_get_addr.
+	C_TLS_GD
 
 	C_TEXTSIZE
 

@@ -5,6 +5,7 @@
 package synctest_test
 
 import (
+	"context"
 	"fmt"
 	"internal/synctest"
 	"internal/testenv"
@@ -326,6 +327,31 @@ func TestAfterFuncRunsImmediately(t *testing.T) {
 		for !b.Load() {
 			runtime.Gosched()
 		}
+	})
+}
+
+// TestTimerResetZeroDoNotHang verifies that using timer.Reset(0) does not
+// cause the test to hang indefinitely. See https://go.dev/issue/76052.
+func TestTimerResetZeroDoNotHang(t *testing.T) {
+	synctest.Run(func() {
+		timer := time.NewTimer(0)
+		ctx, cancel := context.WithCancel(context.Background())
+
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-timer.C:
+				}
+			}
+		}()
+
+		synctest.Wait()
+		timer.Reset(0)
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
 	})
 }
 
@@ -777,6 +803,28 @@ func TestWaitGroupHeapAllocated(t *testing.T) {
 		synctest.Wait()
 		testWaitGroupHeapAllocatedWG.Done()
 	})
+}
+
+// Issue #75134: Many racing bubble associations.
+func TestWaitGroupManyBubbles(t *testing.T) {
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Go(func() {
+			synctest.Run(func() {
+				cancelc := make(chan struct{})
+				var wg2 sync.WaitGroup
+				for range 100 {
+					wg2.Go(func() {
+						<-cancelc
+					})
+				}
+				synctest.Wait()
+				close(cancelc)
+				wg2.Wait()
+			})
+		})
+	}
+	wg.Wait()
 }
 
 func TestHappensBefore(t *testing.T) {

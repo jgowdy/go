@@ -125,6 +125,8 @@ func TestIntendedInlining(t *testing.T) {
 			"assemble64",
 		},
 		"unicode/utf8": {
+			"DecodeRune",
+			"DecodeRuneInString",
 			"FullRune",
 			"FullRuneInString",
 			"RuneLen",
@@ -230,6 +232,16 @@ func TestIntendedInlining(t *testing.T) {
 		},
 		"testing": {
 			"(*B).Loop",
+		},
+		"time": {
+			"Duration.String",
+		},
+		"path": {
+			"Base",
+			"scanChunk",
+		},
+		"path/filepath": {
+			"scanChunk",
 		},
 	}
 

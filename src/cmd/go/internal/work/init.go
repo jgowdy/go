@@ -50,16 +50,17 @@ func makeCfgChangedEnv() []string {
 	return slices.Clip(env)
 }
 
-func BuildInit() {
+func BuildInit(loaderstate *modload.State) {
 	if buildInitStarted {
 		base.Fatalf("go: internal error: work.BuildInit called more than once")
 	}
 	buildInitStarted = true
 	base.AtExit(closeBuilders)
 
-	modload.Init()
+	modload.Init(loaderstate)
 	instrumentInit()
 	buildModeInit()
+	initCompilerConcurrencyPool()
 	cfgChangedEnv = makeCfgChangedEnv()
 
 	if err := fsys.Init(); err != nil {
@@ -239,6 +240,11 @@ func buildModeInit() {
 				// suitable for inclusion in a PIE or
 				// shared library.
 				codegenArg = "-shared"
+				// Use General Dynamic TLS model so the library can be
+				// loaded via dlopen on non-glibc systems (e.g. musl).
+				// See go.dev/issue/13492.
+				forcedAsmflags = append(forcedAsmflags, "-tls=GD")
+				forcedGcflags = append(forcedGcflags, "-tls=GD")
 			}
 		}
 		cfg.ExeSuffix = ".a"
@@ -251,6 +257,11 @@ func buildModeInit() {
 			switch cfg.Goos {
 			case "linux", "android", "freebsd":
 				codegenArg = "-shared"
+				// Use General Dynamic TLS model so the library can be
+				// loaded via dlopen on non-glibc systems (e.g. musl).
+				// See go.dev/issue/13492.
+				forcedAsmflags = append(forcedAsmflags, "-tls=GD")
+				forcedGcflags = append(forcedGcflags, "-tls=GD")
 			case "windows":
 				// Do not add usual .exe suffix to the .dll file.
 				cfg.ExeSuffix = ""

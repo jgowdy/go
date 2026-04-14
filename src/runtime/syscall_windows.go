@@ -7,7 +7,6 @@ package runtime
 import (
 	"internal/abi"
 	"internal/goarch"
-	"internal/runtime/syscall/windows"
 	"unsafe"
 )
 
@@ -98,19 +97,14 @@ func (p *abiDesc) assignArg(t *_type) {
 		// passed as two words (little endian); and
 		// structs are pushed on the stack. In
 		// fastcall, arguments larger than the word
-		// size are passed by reference. On arm,
-		// 8-byte aligned arguments round up to the
-		// next even register and can be split across
-		// registers and the stack.
+		// size are passed by reference.
 		panic("compileCallback: argument size is larger than uintptr")
 	}
 	if k := t.Kind(); GOARCH != "386" && (k == abi.Float32 || k == abi.Float64) {
 		// In fastcall, floating-point arguments in
 		// the first four positions are passed in
 		// floating-point registers, which we don't
-		// currently spill. arm passes floating-point
-		// arguments in VFP registers, which we also
-		// don't support.
+		// currently spill.
 		// So basically we only support 386.
 		panic("compileCallback: float arguments not supported")
 	}
@@ -127,7 +121,7 @@ func (p *abiDesc) assignArg(t *_type) {
 	// argument word and all supported Windows
 	// architectures are little endian, so srcStackOffset
 	// is already pointing to the right place for smaller
-	// arguments. The same is true on arm.
+	// arguments.
 
 	oldParts := p.parts
 	if p.tryRegAssignArg(t, 0) {
@@ -163,8 +157,8 @@ func (p *abiDesc) assignArg(t *_type) {
 		p.dstStackSize += t.Size_
 	}
 
-	// cdecl, stdcall, fastcall, and arm pad arguments to word size.
-	// TODO(rsc): On arm and arm64 do we need to skip the caller's saved LR?
+	// cdecl, stdcall, and fastcall pad arguments to word size.
+	// TODO(rsc): On arm64 do we need to skip the caller's saved LR?
 	p.srcStackSize += goarch.PtrSize
 }
 
@@ -261,7 +255,7 @@ const callbackMaxFrame = 64 * goarch.PtrSize
 //
 // On 386, if cdecl is true, the returned C function will use the
 // cdecl calling convention; otherwise, it will use stdcall. On amd64,
-// it always uses fastcall. On arm, it always uses the ARM convention.
+// it always uses fastcall.
 //
 //go:linkname compileCallback syscall.compileCallback
 func compileCallback(fn eface, cdecl bool) (code uintptr) {
@@ -356,10 +350,6 @@ type callbackArgs struct {
 	// For fastcall, the trampoline spills register arguments to
 	// the reserved spill slots below the stack arguments,
 	// resulting in a layout equivalent to stdcall.
-	//
-	// For arm, the trampoline stores the register arguments just
-	// below the stack arguments, so again we can treat it as one
-	// big stack arguments frame.
 	args unsafe.Pointer
 	// Below are out-args from callbackWrap
 	result uintptr
@@ -424,9 +414,6 @@ func syscall_syscalln(fn, n uintptr, args ...uintptr) (r1, r2, err uintptr) {
 	if n > uintptr(len(args)) {
 		panic("syscall: n > len(args)") // should not be reachable from user code
 	}
-	if n > windows.MaxArgs {
-		panic("runtime: SyscallN has too many arguments")
-	}
 
 	// The cgocall parameters are stored in m instead of in
 	// the stack because the stack can move during fn if it
@@ -437,10 +424,10 @@ func syscall_syscalln(fn, n uintptr, args ...uintptr) (r1, r2, err uintptr) {
 	if c.N != 0 {
 		c.Args = uintptr(noescape(unsafe.Pointer(&args[0])))
 	}
-	cgocall(asmstdcallAddr, unsafe.Pointer(c))
+	errno := cgocall(asmstdcallAddr, unsafe.Pointer(c))
 	// cgocall may reschedule us on to a different M,
 	// but it copies the return values into the new M's
 	// so we can read them from there.
 	c = &getg().m.winsyscall
-	return c.R1, c.R2, c.Err
+	return c.R1, c.R2, uintptr(uint32(errno))
 }

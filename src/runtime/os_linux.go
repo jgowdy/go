@@ -8,8 +8,8 @@ import (
 	"internal/abi"
 	"internal/goarch"
 	"internal/runtime/atomic"
-	"internal/runtime/strconv"
 	"internal/runtime/syscall/linux"
+	"internal/strconv"
 	"unsafe"
 )
 
@@ -39,9 +39,6 @@ type mOS struct {
 
 	waitsema uint32 // semaphore for parking on locks
 }
-
-//go:noescape
-func futex(addr unsafe.Pointer, op int32, val uint32, ts, addr2 unsafe.Pointer, val3 uint32) int32
 
 // Linux futex.
 //
@@ -79,7 +76,7 @@ func futexsleep(addr *uint32, val uint32, ns int64) {
 
 	var ts timespec
 	ts.setNsec(ns)
-	futex(unsafe.Pointer(addr), _FUTEX_WAIT_PRIVATE, val, unsafe.Pointer(&ts), nil, 0)
+	futex(unsafe.Pointer(addr), _FUTEX_WAIT_PRIVATE, val, &ts, nil, 0)
 }
 
 // If any procs are sleeping on addr, wake up at most cnt.
@@ -237,7 +234,30 @@ func mincore(addr unsafe.Pointer, n uintptr, dst *byte) int32
 
 var auxvreadbuf [128]uintptr
 
+// libinitArgvSafe reports whether argc/argv from .init_array are safe
+// to dereference. On glibc, .init_array functions receive (argc, argv,
+// envp) as a non-standard extension. On musl/bionic/other libc, they
+// receive no arguments per the ELF ABI, so argv contains garbage.
+// Detection uses a weak reference to gnu_get_libc_version set during
+// _cgo_init (which runs before sysargs). See go.dev/issue/13492.
+func libinitArgvSafe() bool {
+	return _cgo_isglibc != nil && *(*byte)(unsafe.Pointer(_cgo_isglibc)) != 0
+}
+
 func sysargs(argc int32, argv **byte) {
+	if islibrary || isarchive {
+		// In library/archive mode, argc/argv from .init_array may be
+		// garbage. On glibc, .init_array functions receive (argc, argv,
+		// envp) as a non-standard extension. On musl/bionic, they
+		// receive nothing (registers contain garbage per ELF ABI).
+		// Even on glibc, validate argc as a sanity check.
+		// See go.dev/issue/13492.
+		if !libinitArgvSafe() || argc < 0 || argc > 1<<16 {
+			sysargsFromProc()
+			return
+		}
+	}
+
 	n := argc + 1
 
 	// skip over argv, envp to get to auxv
@@ -258,6 +278,13 @@ func sysargs(argc int32, argv **byte) {
 	// In some situations we don't get a loader-provided
 	// auxv, such as when loaded as a library on Android.
 	// Fall back to /proc/self/auxv.
+	sysargsFromProc()
+}
+
+// sysargsFromProc reads auxiliary vector data from /proc/self/auxv.
+// Used when argv-based auxv discovery is not possible (library mode)
+// or when the loader did not provide auxv via argv.
+func sysargsFromProc() {
 	fd := open(&procAuxv[0], 0 /* O_RDONLY */, 0)
 	if fd < 0 {
 		// On Android, /proc/self/auxv might be unreadable (issue 9229), so we fallback to
@@ -283,7 +310,7 @@ func sysargs(argc int32, argv **byte) {
 		return
 	}
 
-	n = read(fd, noescape(unsafe.Pointer(&auxvreadbuf[0])), int32(unsafe.Sizeof(auxvreadbuf)))
+	n := read(fd, noescape(unsafe.Pointer(&auxvreadbuf[0])), int32(unsafe.Sizeof(auxvreadbuf)))
 	closefd(fd)
 	if n < 0 {
 		return
@@ -342,8 +369,8 @@ func getHugePageSize() uintptr {
 		return 0
 	}
 	n-- // remove trailing newline
-	v, ok := strconv.Atoi(slicebytetostringtmp((*byte)(ptr), int(n)))
-	if !ok || v < 0 {
+	v, err := strconv.Atoi(slicebytetostringtmp((*byte)(ptr), int(n)))
+	if err != nil || v < 0 {
 		v = 0
 	}
 	if v&(v-1) != 0 {
@@ -356,8 +383,8 @@ func getHugePageSize() uintptr {
 func osinit() {
 	numCPUStartup = getCPUCount()
 	physHugePageSize = getHugePageSize()
-	osArchInit()
 	vgetrandomInit()
+	configure64bitsTimeOn32BitsArchitectures()
 }
 
 var urandom_dev = []byte("/dev/urandom\x00")
@@ -372,7 +399,55 @@ func readRandom(r []byte) int {
 }
 
 func goenvs() {
+	if (islibrary || isarchive) && !libinitArgvSafe() {
+		// In library/archive mode on non-glibc systems, argv contains
+		// garbage so we cannot walk argv to find envp. Read from
+		// /proc/self/environ instead. See go.dev/issue/13492.
+		goenvs_lib()
+		return
+	}
 	goenvs_unix()
+}
+
+var procEnviron = []byte("/proc/self/environ\x00")
+
+// goenvs_lib reads environment variables from /proc/self/environ for use
+// in library/archive mode where argv-based environment discovery is unsafe.
+func goenvs_lib() {
+	// /proc/self/environ contains NUL-separated KEY=VALUE pairs.
+	const bufSize = 8 << 10 // 8KB; we are on the system stack (64KB)
+	var buf [bufSize]byte
+
+	fd := open(&procEnviron[0], 0 /* O_RDONLY */, 0)
+	if fd < 0 {
+		envs = make([]string, 0)
+		return
+	}
+	n := read(fd, noescape(unsafe.Pointer(&buf[0])), int32(bufSize))
+	closefd(fd)
+	if n <= 0 {
+		envs = make([]string, 0)
+		return
+	}
+
+	// Count NUL-separated entries.
+	count := 0
+	for i := int32(0); i < n; i++ {
+		if buf[i] == 0 {
+			count++
+		}
+	}
+
+	envs = make([]string, 0, count)
+	start := 0
+	for i := int32(0); i < n; i++ {
+		if buf[i] == 0 {
+			if i > int32(start) {
+				envs = append(envs, gostring(&buf[start]))
+			}
+			start = int(i) + 1
+		}
+	}
 }
 
 // Called to do synchronous initialization of Go code built with
@@ -440,9 +515,6 @@ func setitimer(mode int32, new, old *itimerval)
 func timer_create(clockid int32, sevp *sigevent, timerid *int32) int32
 
 //go:noescape
-func timer_settime(timerid int32, flags int32, new, old *itimerspec) int32
-
-//go:noescape
 func timer_delete(timerid int32) int32
 
 //go:noescape
@@ -487,7 +559,8 @@ func setsig(i uint32, fn uintptr) {
 	sigfillset(&sa.sa_mask)
 	// Although Linux manpage says "sa_restorer element is obsolete and
 	// should not be used". x86_64 kernel requires it. Only use it on
-	// x86.
+	// x86. Note that on 386 this is cleared when using the C sigaction
+	// function via cgo; see fixSigactionForCgo.
 	if GOARCH == "386" || GOARCH == "amd64" {
 		sa.sa_restorer = abi.FuncPCABI0(sigreturn__sigaction)
 	}
@@ -562,6 +635,21 @@ func sysSigaction(sig uint32, new, old *sigactiont) {
 //
 //go:noescape
 func rt_sigaction(sig uintptr, new, old *sigactiont, size uintptr) int32
+
+// fixSigactionForCgo is called when we are using cgo to call the
+// C sigaction function. On 386 the C function does not expect the
+// SA_RESTORER flag to be set, and in some cases will fail if it is set:
+// it will pass the SA_RESTORER flag to the kernel without passing
+// the sa_restorer field. Since the C function will handle SA_RESTORER
+// for us, we need not pass it. See issue #75253.
+//
+//go:nosplit
+func fixSigactionForCgo(new *sigactiont) {
+	if GOARCH == "386" && new != nil {
+		new.sa_flags &^= _SA_RESTORER
+		new.sa_restorer = 0
+	}
+}
 
 func getpid() int
 func tgkill(tgid, tid, sig int)
@@ -925,4 +1013,65 @@ func (c *sigctxt) sigFromSeccomp() bool {
 func mprotect(addr unsafe.Pointer, n uintptr, prot int32) (ret int32, errno int32) {
 	r, _, err := linux.Syscall6(linux.SYS_MPROTECT, uintptr(addr), n, uintptr(prot), 0, 0, 0)
 	return int32(r), int32(err)
+}
+
+type kernelVersion struct {
+	major int
+	minor int
+}
+
+// getKernelVersion returns major and minor kernel version numbers
+// parsed from the uname release field.
+func getKernelVersion() kernelVersion {
+	var buf linux.Utsname
+	if e := linux.Uname(&buf); e != 0 {
+		throw("uname failed")
+	}
+
+	rel := gostringnocopy(&buf.Release[0])
+	major, minor, _, ok := parseRelease(rel)
+	if !ok {
+		throw("failed to parse kernel version from uname")
+	}
+	return kernelVersion{major: major, minor: minor}
+}
+
+// parseRelease parses a dot-separated version number. It follows the
+// semver syntax, but allows the minor and patch versions to be
+// elided.
+func parseRelease(rel string) (major, minor, patch int, ok bool) {
+	// Strip anything after a dash or plus.
+	for i := 0; i < len(rel); i++ {
+		if rel[i] == '-' || rel[i] == '+' {
+			rel = rel[:i]
+			break
+		}
+	}
+
+	next := func() (int, bool) {
+		for i := 0; i < len(rel); i++ {
+			if rel[i] == '.' {
+				ver, err := strconv.Atoi(rel[:i])
+				rel = rel[i+1:]
+				return ver, err == nil
+			}
+		}
+		ver, err := strconv.Atoi(rel)
+		rel = ""
+		return ver, err == nil
+	}
+	if major, ok = next(); !ok || rel == "" {
+		return
+	}
+	if minor, ok = next(); !ok || rel == "" {
+		return
+	}
+	patch, ok = next()
+	return
+}
+
+// GE checks if the running kernel version
+// is greater than or equal to the provided version.
+func (kv kernelVersion) GE(x, y int) bool {
+	return kv.major > x || (kv.major == x && kv.minor >= y)
 }

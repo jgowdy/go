@@ -99,7 +99,7 @@ func init() {
 		}
 	}
 
-	// Floating pointer registers.
+	// Floating point registers.
 	for r := 32; r <= 63; r++ {
 		mask := addreg(r, "")
 		fpMask |= mask
@@ -117,6 +117,8 @@ func init() {
 
 	regCtxt := regNamed["X26"]
 	callerSave := gpMask | fpMask | regNamed["g"]
+	r5toR6 := regNamed["X5"] | regNamed["X6"]
+	regX5 := regNamed["X5"]
 
 	var (
 		gpstore  = regInfo{inputs: []regMask{gpspsbMask, gpspMask, 0}} // SB in first input so we can load from a global, but not in second to avoid using SB as a temporary register
@@ -131,6 +133,7 @@ func init() {
 		gpcas    = regInfo{inputs: []regMask{gpspsbgMask, gpgMask, gpgMask}, outputs: []regMask{gpMask}}
 		gpatomic = regInfo{inputs: []regMask{gpspsbgMask, gpgMask}}
 
+		fp01    = regInfo{outputs: []regMask{fpMask}}
 		fp11    = regInfo{inputs: []regMask{fpMask}, outputs: []regMask{fpMask}}
 		fp21    = regInfo{inputs: []regMask{fpMask, fpMask}, outputs: []regMask{fpMask}}
 		fp31    = regInfo{inputs: []regMask{fpMask, fpMask, fpMask}, outputs: []regMask{fpMask}}
@@ -140,9 +143,13 @@ func init() {
 		fpload  = regInfo{inputs: []regMask{gpspsbMask, 0}, outputs: []regMask{fpMask}}
 		fp2gp   = regInfo{inputs: []regMask{fpMask, fpMask}, outputs: []regMask{gpMask}}
 
-		call        = regInfo{clobbers: callerSave}
-		callClosure = regInfo{inputs: []regMask{gpspMask, regCtxt, 0}, clobbers: callerSave}
-		callInter   = regInfo{inputs: []regMask{gpMask}, clobbers: callerSave}
+		call = regInfo{clobbers: callerSave}
+		// Avoid using X5 as the source register of calls. Using X5 here triggers
+		// RAS pop-then-push behavior which is not correct for function calls.
+		// Please refer to section 2.5.1 of the RISC-V ISA
+		// (https://docs.riscv.org/reference/isa/unpriv/rv32.html#rashints) for details.
+		callClosure = regInfo{inputs: []regMask{gpspMask ^ regX5, regCtxt, 0}, clobbers: callerSave}
+		callInter   = regInfo{inputs: []regMask{gpMask ^ regX5}, clobbers: callerSave}
 	)
 
 	RISCV64ops := []opData{
@@ -175,7 +182,9 @@ func init() {
 		{name: "MOVaddr", argLength: 1, reg: gp11sb, asm: "MOV", aux: "SymOff", rematerializeable: true, symEffect: "Addr"}, // arg0 + auxint + offset encoded in aux
 		// auxint+aux == add auxint and the offset of the symbol in aux (if any) to the effective address
 
-		{name: "MOVDconst", reg: gp01, asm: "MOV", typ: "UInt64", aux: "Int64", rematerializeable: true}, // auxint
+		{name: "MOVDconst", reg: gp01, asm: "MOV", typ: "UInt64", aux: "Int64", rematerializeable: true},      // auxint
+		{name: "FMOVDconst", reg: fp01, asm: "MOVD", typ: "Float64", aux: "Float64", rematerializeable: true}, // auxint
+		{name: "FMOVFconst", reg: fp01, asm: "MOVF", typ: "Float32", aux: "Float32", rematerializeable: true}, // auxint
 
 		// Loads: load <size> bits from arg0+auxint+aux and extend to 64 bits; arg1=mem
 		{name: "MOVBload", argLength: 2, reg: gpload, asm: "MOVB", aux: "SymOff", typ: "Int8", faultOnNilArg0: true, symEffect: "Read"},     //  8 bits, sign extend
@@ -272,94 +281,96 @@ func init() {
 		{name: "LoweredRound64F", argLength: 1, reg: fp11, resultInArg0: true},
 
 		// Calls
-		{name: "CALLstatic", argLength: -1, reg: call, aux: "CallOff", call: true},               // call static function aux.(*gc.Sym). last arg=mem, auxint=argsize, returns mem
-		{name: "CALLtail", argLength: -1, reg: call, aux: "CallOff", call: true, tailCall: true}, // tail call static function aux.(*gc.Sym). last arg=mem, auxint=argsize, returns mem
-		{name: "CALLclosure", argLength: -1, reg: callClosure, aux: "CallOff", call: true},       // call function via closure. arg0=codeptr, arg1=closure, last arg=mem, auxint=argsize, returns mem
-		{name: "CALLinter", argLength: -1, reg: callInter, aux: "CallOff", call: true},           // call fn by pointer. arg0=codeptr, last arg=mem, auxint=argsize, returns mem
+		{name: "CALLstatic", argLength: -1, reg: call, aux: "CallOff", call: true},                         // call static function aux.(*gc.Sym). last arg=mem, auxint=argsize, returns mem
+		{name: "CALLtail", argLength: -1, reg: call, aux: "CallOff", call: true, tailCall: true},           // tail call static function aux.(*gc.Sym). last arg=mem, auxint=argsize, returns mem
+		{name: "CALLtailinter", argLength: -1, reg: callInter, aux: "CallOff", call: true, tailCall: true}, // tail call fn by pointer. arg0=codeptr, last arg=mem, auxint=argsize, returns mem
+		{name: "CALLclosure", argLength: -1, reg: callClosure, aux: "CallOff", call: true},                 // call function via closure. arg0=codeptr, arg1=closure, last arg=mem, auxint=argsize, returns mem
+		{name: "CALLinter", argLength: -1, reg: callInter, aux: "CallOff", call: true},                     // call fn by pointer. arg0=codeptr, last arg=mem, auxint=argsize, returns mem
 
-		// duffzero
-		// arg0 = address of memory to zero (in X25, changed as side effect)
+		// Generic moves and zeros
+
+		// general unrolled zeroing
+		// arg0 = address of memory to zero
 		// arg1 = mem
-		// auxint = offset into duffzero code to start executing
-		// X1 (link register) changed because of function call
+		// auxint = element size and type alignment
+		// returns mem
+		//	mov	ZERO, (OFFSET)(Rarg0)
+		{
+			name:           "LoweredZero",
+			aux:            "SymValAndOff",
+			typ:            "Mem",
+			argLength:      2,
+			symEffect:      "Write",
+			faultOnNilArg0: true,
+			reg: regInfo{
+				inputs: []regMask{gpMask},
+			},
+		},
+		// general unaligned zeroing
+		// arg0 = address of memory to zero (clobber)
+		// arg2 = mem
+		// auxint = element size and type alignment
 		// returns mem
 		{
-			name:      "DUFFZERO",
-			aux:       "Int64",
-			argLength: 2,
-			reg: regInfo{
-				inputs:   []regMask{regNamed["X25"]},
-				clobbers: regNamed["X1"] | regNamed["X25"],
-			},
+			name:           "LoweredZeroLoop",
+			aux:            "SymValAndOff",
 			typ:            "Mem",
+			argLength:      2,
+			symEffect:      "Write",
+			needIntTemp:    true,
 			faultOnNilArg0: true,
+			reg: regInfo{
+				inputs:       []regMask{gpMask},
+				clobbersArg0: true,
+			},
 		},
 
-		// duffcopy
-		// arg0 = address of dst memory (in X25, changed as side effect)
-		// arg1 = address of src memory (in X24, changed as side effect)
+		// general unaligned move
+		// arg0 = address of dst memory (clobber)
+		// arg1 = address of src memory (clobber)
 		// arg2 = mem
-		// auxint = offset into duffcopy code to start executing
-		// X1 (link register) changed because of function call
+		// auxint = size and type alignment
 		// returns mem
+		//	mov	(offset)(Rarg1), TMP
+		//	mov	TMP, (offset)(Rarg0)
 		{
-			name:      "DUFFCOPY",
-			aux:       "Int64",
+			name:      "LoweredMove",
+			aux:       "SymValAndOff",
+			symEffect: "Write",
 			argLength: 3,
 			reg: regInfo{
-				inputs:   []regMask{regNamed["X25"], regNamed["X24"]},
-				clobbers: regNamed["X1"] | regNamed["X24"] | regNamed["X25"],
+				inputs:   []regMask{gpMask &^ regNamed["X5"], gpMask &^ regNamed["X5"]},
+				clobbers: regNamed["X5"],
 			},
-			typ:            "Mem",
 			faultOnNilArg0: true,
 			faultOnNilArg1: true,
 		},
 
-		// Generic moves and zeros
-
-		// general unaligned zeroing
-		// arg0 = address of memory to zero (in X5, changed as side effect)
-		// arg1 = address of the last element to zero (inclusive)
-		// arg2 = mem
-		// auxint = element size
-		// returns mem
-		//	mov	ZERO, (X5)
-		//	ADD	$sz, X5
-		//	BGEU	Rarg1, X5, -2(PC)
-		{
-			name:      "LoweredZero",
-			aux:       "Int64",
-			argLength: 3,
-			reg: regInfo{
-				inputs:   []regMask{regNamed["X5"], gpMask},
-				clobbers: regNamed["X5"],
-			},
-			typ:            "Mem",
-			faultOnNilArg0: true,
-		},
-
 		// general unaligned move
-		// arg0 = address of dst memory (in X5, changed as side effect)
-		// arg1 = address of src memory (in X6, changed as side effect)
-		// arg2 = address of the last element of src (can't be X7 as we clobber it before using arg2)
+		// arg0 = address of dst memory (clobber)
+		// arg1 = address of src memory (clobber)
 		// arg3 = mem
 		// auxint = alignment
-		// clobbers X7 as a tmp register.
 		// returns mem
-		//	mov	(X6), X7
-		//	mov	X7, (X5)
-		//	ADD	$sz, X5
 		//	ADD	$sz, X6
-		//	BGEU	Rarg2, X5, -4(PC)
+		//loop:
+		//	mov	(Rarg1), X5
+		//	mov	X5, (Rarg0)
+		//	...rest 7 mov...
+		//	ADD	$sz, Rarg0
+		//	ADD	$sz, Rarg1
+		//	BNE	X6, Rarg1, loop
 		{
-			name:      "LoweredMove",
-			aux:       "Int64",
-			argLength: 4,
+			name:      "LoweredMoveLoop",
+			aux:       "SymValAndOff",
+			argLength: 3,
+			symEffect: "Write",
 			reg: regInfo{
-				inputs:   []regMask{regNamed["X5"], regNamed["X6"], gpMask &^ regNamed["X7"]},
-				clobbers: regNamed["X5"] | regNamed["X6"] | regNamed["X7"],
+				inputs:       []regMask{gpMask &^ r5toR6, gpMask &^ r5toR6},
+				clobbers:     r5toR6,
+				clobbersArg0: true,
+				clobbersArg1: true,
 			},
-			typ:            "Mem",
 			faultOnNilArg0: true,
 			faultOnNilArg1: true,
 		},
@@ -452,6 +463,7 @@ func init() {
 		{name: "FNMADDS", argLength: 3, reg: fp31, asm: "FNMADDS", commutative: true, typ: "Float32"},                                       // -(arg0 * arg1) + arg2
 		{name: "FNMSUBS", argLength: 3, reg: fp31, asm: "FNMSUBS", commutative: true, typ: "Float32"},                                       // -(arg0 * arg1) - arg2
 		{name: "FSQRTS", argLength: 1, reg: fp11, asm: "FSQRTS", typ: "Float32"},                                                            // sqrt(arg0)
+		{name: "FABSS", argLength: 1, reg: fp11, asm: "FABSS", typ: "Float32"},                                                              // abs(arg0)
 		{name: "FNEGS", argLength: 1, reg: fp11, asm: "FNEGS", typ: "Float32"},                                                              // -arg0
 		{name: "FMVSX", argLength: 1, reg: gpfp, asm: "FMVSX", typ: "Float32"},                                                              // reinterpret arg0 as float32
 		{name: "FMVXS", argLength: 1, reg: fpgp, asm: "FMVXS", typ: "Int32"},                                                                // reinterpret arg0 as int32, sign extended to 64 bits
@@ -518,6 +530,10 @@ func init() {
 		//   ====+=============================
 		{name: "FCLASSS", argLength: 1, reg: fpgp, asm: "FCLASSS", typ: "Int64"}, // classify float32
 		{name: "FCLASSD", argLength: 1, reg: fpgp, asm: "FCLASSD", typ: "Int64"}, // classify float64
+
+		// RISC-V Integer Conditional (Zicond) operations extension
+		{name: "CZEROEQZ", argLength: 2, reg: gp21, asm: "CZEROEQZ"}, // arg1 == 0 result is 0, else arg0
+		{name: "CZERONEZ", argLength: 2, reg: gp21, asm: "CZERONEZ"}, // arg1 != 0 result is 0, else arg0
 	}
 
 	RISCV64blocks := []blockData{
